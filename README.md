@@ -1,5 +1,13 @@
 # FF16 VFXB tools
 
+View and edit Final Fantasy XVI visual effects (`.vfxb` files).
+
+- Browse effect graphs and animation curves.
+- Edit effect values, shader constants, and texture/model paths.
+- Save changes with automatic original-file backups.
+- Pack edited effects into PAC archives using FF16Tools.
+- Extract shaders and convert them to GLSL using external tools.
+
 ## Windows x64 release (no Python installation needed)
 
 Extract **all** files from `VFXBViewer-windows-x64.zip` to a writable folder,
