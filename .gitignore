@@ -1,0 +1,27 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local paths (copy config.example.json to config.json)
+config.json
+config.json.tmp
+
+# Release build output
+build/
+dist/
+
+# Generated game assets, backups and shader output
+*.vfxb
+*.pac
+*.dxbc
+*.spv
+*.glsl
+
+# Editor / OS files
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store

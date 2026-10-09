@@ -1,0 +1,8 @@
+{
+  "output_root": "D:/FF16/Output",
+  "packback_dir": "D:/FF16/PackBack/Effects",
+  "diff_pac": "D:/FF16/Mods/0029.diff.pac",
+  "ff16tools_cli": "D:/Tools/FF16Tools/FF16Tools.CLI.exe",
+  "dxbc2spirv": "D:/Tools/dxil-spirv/dxil-spirv.exe",
+  "spirv_cross": "D:/Tools/SPIRV-Cross/spirv-cross.exe"
+}
