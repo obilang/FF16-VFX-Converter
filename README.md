@@ -39,6 +39,42 @@ PC before publishing; the smoke test does not exercise external game tools.
 
 Run `python vfxb_viewer.py` with PySide6 installed to open the graph editor.
 
+### Character collision files (CCB)
+
+Open **Tools → CCB Collision Viewer…** in the VFX viewer, or run:
+
+```powershell
+python ccb_viewer.py "path/to/characollision.ccb"
+python ccb_viewer.py "path/to/collision"
+python ccb_decode.py "path/to/characollision.ccb" "output.json"
+```
+
+The CCB viewer opens individual files or lists the `.ccb` files directly in a
+folder. Search and sort collision entries by ID, name, joint, inferred shape, type or collision
+ID; select a row to inspect its fields, offsets and payloads. A separate tab
+shows EID definitions and their two vectors. **File → Export JSON…** exports the
+whole decoded file. The decoder uses only the Python standard library and
+defaults to a sibling `.json` when no output path is supplied.
+
+CCB support follows Nenkai's `FF16_ccb_CharaCollisionBinary.bt`: `CCCB` header,
+0x5C-byte entries, data types 2/3, the template's collision variants, and
+0x40-byte EID definitions. Unknown fields retain their offset-based names;
+payloads include signed integers, raw hex and optional float interpretations.
+Unknown payload variants produce warnings and expose only their known headers.
+Version 1 was verified against a sample; other versions warn and use the same
+layout. The viewer also includes an **experimental sphere/capsule interpretation**
+and a dimension schematic. Type 2 is treated as a candidate sphere; type 3 as a
+candidate capsule. Radius, capsule half-segment length, position and rotation
+are inferred from the c1001 sample, not verified against the engine. All raw
+fields remain available. Unrecognized layouts and invalid dimensions receive
+no shape interpretation. See [CCB_FORMAT.md](CCB_FORMAT.md) for offsets and evidence.
+
+The schematic centers the shape at the origin and assumes a Y-axis capsule;
+it does not apply joint transforms or rotation. It is not a posed character
+collision overlay. CCB files remain read-only.
+
+Run `python -m unittest test_ccb` to check decoding and the offscreen viewer.
+
 ## Paths
 
 Use **Settings → Paths…**, or copy `config.example.json` to `config.json`

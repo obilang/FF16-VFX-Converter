@@ -25,7 +25,9 @@ def smoke_test(report_path):
     dialog = PathSettingsDialog(window)
     window.show()
     dialog.show()
+    window._show_ccb_viewer()
     app.processEvents()
+    assert window._ccb_viewer.isVisible()
     assert struct.calcsize('P') == 8
     assert getattr(sys, 'frozen', False)
     assert path_config.CONFIG_PATH == Path(sys.executable).resolve().with_name('config.json')
@@ -39,8 +41,10 @@ def smoke_test(report_path):
         'config_path': str(path_config.CONFIG_PATH),
         'gui': 'Main window and path settings initialized',
         'shader_modules': 'Imported from bundle',
+        'ccb_viewer': 'Collision viewer initialized from bundle',
     }, indent=2), encoding='utf-8')
     dialog.close()
+    window._ccb_viewer.close()
     window.close()
     return 0
 

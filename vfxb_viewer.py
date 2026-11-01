@@ -1474,6 +1474,10 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_menu = self.menuBar().addMenu("&Settings")
         settings_menu.addAction("Paths…").triggered.connect(self._show_path_settings)
 
+        tools_menu = self.menuBar().addMenu("&Tools")
+        tools_menu.addAction("CCB Collision Viewer…").triggered.connect(self._show_ccb_viewer)
+        self._ccb_viewer = None
+
         left = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(left)
         lv.setContentsMargins(6, 6, 6, 6)
@@ -1569,6 +1573,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._restore_last_session()
 
     # --- recent files/folders ---------------------------------------------
+
+    def _show_ccb_viewer(self):
+        from ccb_viewer import MainWindow as CcbWindow
+        if self._ccb_viewer is None:
+            self._ccb_viewer = CcbWindow(parent=self)
+        self._ccb_viewer.show()
+        self._ccb_viewer.raise_()
+        self._ccb_viewer.activateWindow()
 
     def _show_path_settings(self):
         try:
