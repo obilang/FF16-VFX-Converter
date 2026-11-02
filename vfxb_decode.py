@@ -24,7 +24,7 @@ What it extracts:
       * scalar2 (0x8A/0x8B) - float pairs
       * texture_group (0x31)- resolved texture path set
       * generic - raw bytes + best-effort float/int interpretation
-  - tree_stats: node count, max depth, total keyframes, inferred model-binding
+  - tree_stats: node count, max depth, total keyframes, resolved model-binding
     count, and histograms of property types and node hashes.
 
 Non-finite floats (the +inf keyframe sentinel, or byte patterns that are not
@@ -605,6 +605,16 @@ def parse_property(r, blobs, addr_0x0, tex_indices, strings):
     if ptype == 0x31:  # texture group reference (GenerateProperty_0x31)
         r.u16()
         size = r.i16()
+        # Renderer references, independent of the texture group. Preserve the
+        # full slot words: only their low-byte program selectors are decoded.
+        if size >= 0x24 and start + 0x24 <= len(r.d):
+            prop["shader_slots"] = [
+                {"slot": i, "program_index": r.d[start + 4 + i * 4],
+                 "raw": struct.unpack_from("<I", r.d, start + 4 + i * 4)[0]}
+                for i in range(8) if r.d[start + 4 + i * 4] != 0xFF
+            ]
+        if size >= 0x53 and start + 0x53 <= len(r.d):
+            prop["model_string_index"] = r.d[start + 0x52]
         # per the .bt layout the group offset is the `short offset` field at
         # +0x26 (after 8 ints + one short), NOT +0x2A. The group table is
         # addressed by byte offset, each TextureGroup being 8 bytes.
@@ -839,41 +849,27 @@ def _parse_tec_programs(blob):
 
 
 def _annotate_model_bindings(items, string_entries):
-    """Infer each textured render node's model from asset-block ordering.
-
-    VFXB has no model-index table. Its global strings are instead authored in
-    renderer blocks: a ``.mdl`` entry starts a block and is followed by that
-    renderer's primary texture. Extra texture slots may reuse strings belonging
-    to other blocks, so the first resolved texture slot is the block anchor.
-    """
-    model_entries = [entry for entry in string_entries
-                     if entry.get("kind") == "model"]
-    if not model_entries:
-        return
+    """Resolve validated 0x31 +0x52 model references; never guess by texture."""
+    entries = {entry["index"]: entry for entry in string_entries}
 
     def visit(node):
-        if "hash" not in node:
-            return
-        primary_index = None
-        for prop in node.get("properties", []):
-            if prop.get("kind") != "texture_group":
-                continue
-            indices = prop.get("group", {}).get("string_indices", [])
-            if indices:
-                primary_index = indices[0]
-                break
-        if primary_index is not None:
-            preceding = [entry for entry in model_entries
-                         if entry["index"] < primary_index]
-            if preceding:
-                model = preceding[-1]
-                node["model"] = model["value"]
-                node["model_string_index"] = model["index"]
-                node["model_binding"] = {
-                    "confidence": "inferred",
-                    "method": "asset_block_before_primary_texture",
-                    "primary_texture_string_index": primary_index,
-                }
+        for key in ("model", "model_string_index", "model_binding"):
+            node.pop(key, None)
+        renderers = [p for p in node.get("properties", []) if p["type"] == "0x31"]
+        if renderers:
+            indices = list(dict.fromkeys(p.get("model_string_index") for p in renderers))
+            index = indices[0] if len(indices) == 1 else None
+            entry = entries.get(index) if index != 255 else None
+            resolved = entry is not None and entry.get("kind") == "model"
+            node["model_binding"] = {
+                "confidence": "reference" if resolved else "unresolved",
+                "method": "renderer_0x31_model_string_index",
+                "indices": indices,
+                "note": "Model string selector at 0x31 +0x52; validated against model entries.",
+            }
+            if resolved:
+                node["model"] = entry["value"]
+                node["model_string_index"] = index
         for child in node.get("children", []):
             visit(child)
 
@@ -882,85 +878,41 @@ def _annotate_model_bindings(items, string_entries):
 
 
 def _annotate_nodes(items, programs):
-    """Pair ordered shader-program groups with ordered render/particle nodes.
+    """Resolve renderer program slots instead of pairing nodes by order.
 
-    The VFXB does not contain a verified node -> TEC program index.  What is
-    observable across files is that render leaves and shader groups appear in
-    matching authored order.  Consecutive programs that use the same vertex
-    ShaderData are treated as variants of one renderer (usually differing in
-    their pixel shader), then those groups are paired with render leaves in
-    depth-first item order.
-
-    The annotation deliberately records this as an inference.  A count
-    mismatch leaves nodes/groups unmatched instead of silently wrapping or
-    assigning every program to every node.
+    Low-byte selectors are supported; the remaining slot bits are preserved
+    by the parser and their semantics remain unknown.
     """
-    if not programs:
-        return
-
-    def is_render(node):
-        return (node.get("child_count") == 0
-                and any(pr.get("type") == "0x31"
-                        for pr in node.get("properties", [])))
-
-    render_nodes = []
+    by_index = {p["program"]: p for p in (programs or [])}
 
     def visit(node):
-        if "hash" not in node:
-            return
-        if is_render(node):
-            render_nodes.append(node)
-        for c in node.get("children", []):
-            visit(c)
+        node.pop("shader", None)
+        renderers = [p for p in node.get("properties", []) if p["type"] == "0x31"]
+        if renderers:
+            slots = [dict(slot, property_offset=p["offset"])
+                     for p in renderers for slot in p.get("shader_slots", [])]
+            indices = list(dict.fromkeys(slot["program_index"] for slot in slots))
+            missing = [i for i in indices if i not in by_index]
+            note = "Programs selected by this node's 0x31 renderer slots."
+            if missing:
+                note += " Unavailable program indices: " + ", ".join(map(str, missing)) + "."
+            if not indices:
+                note += " No program references decoded."
+            node["shader"] = {
+                "confidence": "reference",
+                "method": "renderer_0x31_program_slots",
+                "node_hash": node.get("hash", "?"),
+                "slots": slots,
+                "program_indices": indices,
+                "unresolved_program_indices": missing,
+                "programs": [by_index[i] for i in indices if i in by_index],
+                "note": note,
+            }
+        for child in node.get("children", []):
+            visit(child)
 
-    for it in items:
-        visit(it)
-
-    # Build contiguous renderer groups.  Keeping this contiguous is important:
-    # if the same vertex shader is reused later by another renderer, it remains
-    # a separate ordered group rather than being merged globally.
-    # Compute/other programs are not particle render pipelines and must not
-    # shift the ordered VS/PS pairing.
-    render_programs = [p for p in programs
-                       if p.get("vertex") or p.get("pixel")]
-    program_groups = []
-    previous_signature = object()
-    for program in render_programs:
-        vertex_signature = tuple(
-            entry.get("shader_data_index") for entry in program.get("vertex", [])
-        )
-        # Programs without a vertex entry cannot be grouped safely.
-        signature = vertex_signature or ("program", program.get("program"))
-        if not program_groups or signature != previous_signature:
-            program_groups.append([])
-        program_groups[-1].append(program)
-        previous_signature = signature
-
-    node_count = len(render_nodes)
-    group_count = len(program_groups)
-    for order, node in enumerate(render_nodes):
-        group = program_groups[order] if order < group_count else []
-        program_indices = [p.get("program") for p in group]
-        note = (
-            f"Inferred by order: render particle {order + 1}/{node_count} is "
-            f"paired with consecutive shader group {order + 1}/{group_count}. "
-            "Programs sharing the same vertex shader are treated as variants. "
-            "The VFXB/TEC data does not contain a verified node-program link."
-        )
-        if not group:
-            note += " No shader group exists at this order."
-        elif node_count != group_count:
-            note += (f" Counts differ ({node_count} render particles, "
-                     f"{group_count} shader groups).")
-        node["shader"] = {
-            "confidence": "inferred",
-            "method": "render_and_shader_group_order",
-            "particle_order": order,
-            "shader_group_order": order if group else None,
-            "program_indices": program_indices,
-            "programs": group,
-            "note": note,
-        }
+    for item in items:
+        visit(item)
 
 
 def export_shaders(vfxb_path, blobs, out_dir, *, do_glsl=True, keep_spv=False,
@@ -1226,7 +1178,7 @@ def main(argv):
     print(f"  project items   : {result['project_info']['item_count']}")
     st = result["tree_stats"]
     print(f"  graph nodes     : {st['node_count']} (max depth {st['max_depth']})")
-    print(f"  model bindings  : {st['model_binding_count']} inferred")
+    print(f"  model bindings  : {st['model_binding_count']} resolved")
     print(f"  keyframes total : {st['total_keyframes']}")
     print(f"  distinct props  : {len(st['property_type_counts'])} types")
     sb = result["shader_blob"]
