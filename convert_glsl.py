@@ -2,7 +2,7 @@
 Automatic DXBC -> SPIR-V -> GLSL converter for Final Fantasy XVI shaders.
 
 Pipeline per shader:
-  1. dxbc2spirv.exe  shader.dxbc  -o  shader.spv      (DXBC  -> SPIR-V)
+  1. dxbc2spirv.exe  shader.dxbc  -o shader.spv       (DXBC  -> SPIR-V)
   2. spirv-cross.exe shader.spv   --output shader.glsl (SPIR-V -> GLSL)
 
 Usage:
@@ -67,7 +67,7 @@ def convert_one(dxbc_path: str, *, keep_spv: bool, force: bool) -> bool:
     except (OSError, ValueError) as exc:
         print(f'  [FAIL] {name}: {exc}')
         return False
-    ok, out = run([dxbc2spirv, dxbc_path, '--output', spv_path])
+    ok, out = run([dxbc2spirv, dxbc_path, '-o', spv_path])
     if not ok or not os.path.exists(spv_path):
         print(f'  [FAIL] {name}  dxbc2spirv error:')
         print('    ' + out.strip().replace('\n', '\n    '))

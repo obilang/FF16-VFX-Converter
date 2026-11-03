@@ -20,25 +20,19 @@ Run:
 """
 
 import sys
-import shutil
-import subprocess
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 import tlb_decode
 import tlb_encode
+import vfxb_encode
+from path_config import TLB_CONFIG_PATH, TLB_PATH_KEYS
+from path_settings import PathSettingsDialog
 
-# ─────────────────────────────────────────────── repack config
-# On save, the edited .tlb is also mirrored into a PackBack tree (preserving
-# its path relative to the raw extracted-data root) and FF16Tools.CLI packs
-# that tree into a .diff.pac mod archive.
-FF16TOOLS_CLI = Path(
-    r"D:\Softwares\FF16Tools.CLI-win-x64\win-x64\FF16Tools.CLI.exe")
-RAW_ROOT = Path(r"\\ds423plus\devdata\FF16Raw")
-PACKBACK_DIR = Path(r"\\ds423plus\devdata\FF16Raw_Pack\Timelines")
-DIFF_PAC = Path(
-    r"D:\SteamLibrary\steamapps\common\FINAL FANTASY XVI\data\0001.diff.pac")
+# On save, the edited .tlb is also mirrored into the PackBack tree and packed
+# into the .diff.pac mod archive. Paths come from tlb_config.json
+# (Settings > Paths), kept separate from the VFXB viewer's config.json.
 
 # ─────────────────────────────────────────────── layout constants
 RULER_H    = 28       # top ruler strip height
@@ -630,6 +624,9 @@ class MainWindow(QtWidgets.QMainWindow):
         act_clear_recent.triggered.connect(self._clear_recent)
         self._rebuild_recent_menu()
 
+        settings_menu = self.menuBar().addMenu("&Settings")
+        settings_menu.addAction("Paths…").triggered.connect(self._show_path_settings)
+
         # ── left panel ────────────────────────────────────────────────────
         left = QtWidgets.QWidget()
         lv   = QtWidgets.QVBoxLayout(left)
@@ -981,61 +978,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pack_current()
 
     def _pack_current(self):
-        """Copy the saved .tlb into PackBack (relative to the raw-data root) and run
-        FF16Tools.CLI to build the .diff.pac. Non-fatal on failure — the file
-        is already saved in place."""
-        src = self._current_file
-        try:
-            rel = src.resolve().relative_to(RAW_ROOT.resolve())
-        except ValueError:
-            self.statusBar().showMessage(
-                f"Saved — skipped repack ({src.name} is outside {RAW_ROOT})")
-            return
-
-        dest = PACKBACK_DIR / rel
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "PackBack copy failed", str(e))
-            return
-
-        if not FF16TOOLS_CLI.exists():
-            QtWidgets.QMessageBox.warning(
-                self, "Pack skipped",
-                f"Copied to PackBack but CLI not found:\n{FF16TOOLS_CLI}")
-            return
-
-        # remove stale archive first so the pack always produces a fresh one
-        try:
-            if DIFF_PAC.exists():
-                DIFF_PAC.unlink()
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Pack failed", str(e))
-            return
-
-        self.statusBar().showMessage(f"Packing {DIFF_PAC.name} …")
+        """Copy the saved .tlb into PackBack and build the .diff.pac using the
+        shared path settings. Non-fatal on failure — the file is already saved
+        in place."""
+        self.statusBar().showMessage("Packing …")
         QtWidgets.QApplication.processEvents()
-        cmd = [str(FF16TOOLS_CLI), "pack",
-               "-i", str(PACKBACK_DIR), "-o", str(DIFF_PAC)]
+        ok, msg = vfxb_encode.pack_diff(
+            self._current_file, config_path=TLB_CONFIG_PATH,
+            keys=TLB_PATH_KEYS, file_type="TLB")
+        if not ok:
+            QtWidgets.QMessageBox.warning(self, "Pack", msg)
+            self.statusBar().showMessage(f"Saved — {msg}")
+        else:
+            self.statusBar().showMessage(msg)
+
+    def _show_path_settings(self):
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  cwd=str(PACKBACK_DIR.parent))
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Pack failed",
-                                          f"{e}\n\n{' '.join(cmd)}")
+            dialog = PathSettingsDialog(
+                self, config_path=TLB_CONFIG_PATH, keys=TLB_PATH_KEYS,
+                file_type="TLB", example_rel="timeline/attack.tlb")
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Cannot read settings", str(exc))
             return
-
-        if proc.returncode != 0 or not DIFF_PAC.exists():
-            tail = (proc.stderr or proc.stdout or "").strip()[-2000:]
-            QtWidgets.QMessageBox.warning(
-                self, "Pack failed",
-                f"FF16Tools.CLI exited with code {proc.returncode}.\n\n{tail}")
-            self.statusBar().showMessage("Pack failed — see dialog.")
-            return
-
-        self.statusBar().showMessage(
-            f"Saved {src.name} → PackBack\\{rel}  ·  packed {DIFF_PAC.name}")
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            self.statusBar().showMessage("Path settings saved; they apply to the next operation.")
 
     def _restore_current(self):
         if self._current_file is None:

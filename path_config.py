@@ -1,4 +1,8 @@
-"""Shared path settings for the viewer and standalone tools; no Qt required."""
+"""Path settings for the viewers and standalone tools; no Qt required.
+
+The VFXB viewer and shader tools use config.json; the TLB viewer keeps its own
+tlb_config.json so timelines can pack to a separate PackBack / PAC archive.
+"""
 
 import json
 import os
@@ -15,18 +19,21 @@ CONFIG_PATH = config_path()
 PATH_KEYS = ("output_root", "packback_dir", "diff_pac", "ff16tools_cli",
              "dxbc2spirv", "spirv_cross")
 
+TLB_CONFIG_PATH = CONFIG_PATH.with_name("tlb_config.json")
+TLB_PATH_KEYS = ("output_root", "packback_dir", "diff_pac", "ff16tools_cli")
 
-def load_config():
+
+def load_config(path=CONFIG_PATH, keys=PATH_KEYS):
     """Read on demand so settings changes apply without restarting tools."""
-    settings = dict.fromkeys(PATH_KEYS, "")
-    if CONFIG_PATH.exists():
+    settings = dict.fromkeys(keys, "")
+    if path.exists():
         try:
-            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            raise ValueError(f"Cannot read {CONFIG_PATH}: {exc}") from exc
+            raise ValueError(f"Cannot read {path}: {exc}") from exc
         if not isinstance(data, dict):
-            raise ValueError(f"{CONFIG_PATH} must contain a JSON object")
-        for key in PATH_KEYS:
+            raise ValueError(f"{path} must contain a JSON object")
+        for key in keys:
             value = data.get(key, "")
             if not isinstance(value, str) or "\x00" in value:
                 raise ValueError(f"Invalid path setting: {key}")
@@ -34,23 +41,23 @@ def load_config():
     return settings
 
 
-def save_config(settings):
+def save_config(settings, path=CONFIG_PATH, keys=PATH_KEYS):
     """Replace the config atomically, retaining any unrelated JSON keys."""
     data = {}
-    if CONFIG_PATH.exists():
-        load_config()  # Validate before replacing an existing file.
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    data.update({key: settings[key].strip() for key in PATH_KEYS})
-    temporary = CONFIG_PATH.with_suffix(".json.tmp")
+    if path.exists():
+        load_config(path, keys)  # Validate before replacing an existing file.
+        data = json.loads(path.read_text(encoding="utf-8"))
+    data.update({key: settings[key].strip() for key in keys})
+    temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(CONFIG_PATH)
+    temporary.replace(path)
 
 
-def configured_path(settings, key):
+def configured_path(settings, key, path=CONFIG_PATH):
     value = settings.get(key, "").strip()
     if not value:
-        raise ValueError(f"Set '{key}' in Settings > Paths or {CONFIG_PATH.name}")
-    path = Path(os.path.expandvars(value)).expanduser()
-    if not path.is_absolute():
-        path = CONFIG_PATH.parent / path
-    return path.resolve()
+        raise ValueError(f"Set '{key}' in Settings > Paths or {path.name}")
+    result = Path(os.path.expandvars(value)).expanduser()
+    if not result.is_absolute():
+        result = path.parent / result
+    return result.resolve()

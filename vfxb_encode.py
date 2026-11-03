@@ -41,7 +41,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from path_config import configured_path, load_config
+from path_config import CONFIG_PATH, PATH_KEYS, configured_path, load_config
 
 
 BLOB_PTR_BASE = 0x1B8
@@ -403,27 +403,31 @@ def restore_backup(path):
 
 # ─────────────────────────────────────────────── PackBack + repack
 
-def pack_diff(saved_path):
+def pack_diff(saved_path, *, config_path=CONFIG_PATH, keys=PATH_KEYS,
+              file_type="VFXB"):
     """Mirror `saved_path` into PackBack and build the .diff.pac archive.
+
+    Paths come from `config_path` (config.json by default; the TLB viewer
+    passes its own tlb_config.json).
 
     Returns (ok, message). Non-fatal: the file is already saved in place, so a
     packing failure only means the mod archive wasn't refreshed.
     """
     src = Path(saved_path)
     try:
-        settings = load_config()
-        output_root = configured_path(settings, "output_root")
-        packback_dir = configured_path(settings, "packback_dir")
-        diff_pac = configured_path(settings, "diff_pac")
-        cli = configured_path(settings, "ff16tools_cli")
+        settings = load_config(config_path, keys)
+        output_root = configured_path(settings, "output_root", config_path)
+        packback_dir = configured_path(settings, "packback_dir", config_path)
+        diff_pac = configured_path(settings, "diff_pac", config_path)
+        cli = configured_path(settings, "ff16tools_cli", config_path)
         if not cli.is_file():
             return False, f"FF16Tools CLI not found: {cli}"
         if not src.is_file():
-            return False, f"VFXB file not found: {src}"
+            return False, f"{file_type} file not found: {src}"
         if diff_pac.suffix.lower() != ".pac":
             return False, "PAC output must be a .pac file"
         if packback_dir == output_root or output_root in packback_dir.parents:
-            return False, "PackBack must be outside the VFXB export root"
+            return False, f"PackBack must be outside the {file_type} export root"
         if diff_pac == packback_dir or packback_dir in diff_pac.parents:
             return False, "PAC output must be outside PackBack"
     except (OSError, ValueError) as exc:
