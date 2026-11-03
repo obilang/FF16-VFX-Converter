@@ -466,7 +466,34 @@ extension.
 
 ---
 
-## 7. Models (`.mdl`) — inferred for textured render nodes 🟡
+## 7. Renderer model and shader references 🟡
+
+**Current implementation (2026-11-02):** the `0x31` renderer record's byte at
+`+0x52` selects a global string-table entry. Resolve it only when the entry is
+a `.mdl`; `255`, missing fields, conflicting renderer references, and non-model
+entries remain unresolved. This works independently of texture groups. In
+`sword_kiseki_01s`, `A23E2193` selects string 4 (disk01s), while `FABA347A`
+selects string 0 (ring01s), matching user confirmations. A survey of 64 files
+found 587 model-string matches among 599 renderer records, seven `255` entries,
+and five non-model entries. Field semantics for the unresolved cases remain open.
+
+The eight words at `0x31 +0x04..+0x20` carry program-slot selectors in their
+low bytes (`255` = unused). Preserve the full words because the upper bits are
+not yet decoded. Resolve selectors against the TEC program table, which supplies
+the actual VS/PS ShaderData indices. Do not pair nodes and shaders by traversal
+order or consecutive equal vertex shaders: a renderer can reference a refraction
+program plus a copy program with a different vertex shader, and multiple nodes
+can reuse programs. Missing program indices remain unresolved.
+
+For `sword_kiseki_01s`, node program lists are: `55C513B2 → [0,1]`,
+`A3436876 → [2,1]`, `5182F48D → [4,5]`, `B8813D27/69882315 → [6,7]`,
+`A23E2193 → [10,11]`, and `FABA347A → [12,13]`. Both refraction nodes reuse
+copy program 1; program 3 is an equivalent duplicate, not the stored reference.
+These lists describe available renderer programs, not runtime draw/batch counts.
+
+**Historical texture heuristic below — superseded, retained as investigation history.**
+The previous nearest-model-before-primary-texture rule fails when a renderer
+reuses textures associated with another model. It is no longer used as fallback.
 
 There is no explicit model-index table, but the string-table serialization
 order provides the missing renderer binding. Asset strings are authored in

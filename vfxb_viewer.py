@@ -74,6 +74,11 @@ def curve_points(keys):
 # Colours used to draw the channels of a detected vector group.
 CHANNEL_COLORS = ["#e05555", "#5fd08a", "#5b9bd0", "#d0b055"]  # R G B A / X Y Z W
 VEC_LABELS = {2: ["X", "Y"], 3: ["R", "G", "B"], 4: ["R", "G", "B", "A"]}
+SHARED_COLORS = ["#ffcf70", "#80c7ff", "#c7a0ff", "#79d9b0", "#ff9fbc", "#bccc77"]
+
+
+def shared_group_color(group_id):
+    return SHARED_COLORS[(int(group_id[1:]) - 1) % len(SHARED_COLORS)]
 
 
 def _time_sig(keylist_prop):
@@ -89,11 +94,12 @@ def _time_sig(keylist_prop):
 def group_curves(curves):
     """Group curves that animate one vec2/vec3/vec4 parameter.
 
-    Primary signal (reliable): the binding `target_offset` - the byte offset of
-    the animated value in the item's parameter block. Consecutive curves whose
+    Primary heuristic: the binding `target_offset` - the byte offset of
+    the animated value in the item's parameter block. Curves whose
     offsets are 4 bytes apart (a float stride) and share the same binding
-    `target_flags` are the per-channel tracks of one vector. This is what the
-    file actually encodes, so it beats the old time-signature guess.
+    `target_flags` are treated as per-channel tracks of one vector. Sort each
+    compatible run by offset first: serialized order can be 260,264,268,256.
+    Contiguous bindings suggest a vector but do not prove its semantics.
 
     Fallback (older data or missing offsets): group adjacent curves that share
     the same keyframe-time signature.
@@ -101,6 +107,17 @@ def group_curves(curves):
     Returns a list of groups; each group is a list of curve props (length 1 =
     scalar, 2-4 = vector).
     """
+    curves = list(curves)
+    start = 0
+    while start < len(curves):
+        end = start + 1
+        if curves[start].get("target_offset") is not None:
+            while (end < len(curves)
+                   and curves[end].get("target_offset") is not None
+                   and curves[end].get("target_flags") == curves[start].get("target_flags")):
+                end += 1
+            curves[start:end] = sorted(curves[start:end], key=lambda c: c["target_offset"])
+        start = end
     groups = []
     i = 0
     n = len(curves)
@@ -126,6 +143,17 @@ def group_curves(curves):
     return groups
 
 
+def shared_field_groups(sections):
+    """Assign node-local IDs to addresses used by multiple editable fields."""
+    by_address = {}
+    for sec in sections:
+        for fld in sec["fields"]:
+            by_address.setdefault(fld["offset"], []).append((sec["title"], fld))
+    return {addr: (f"S{i + 1}", fields)
+            for i, (addr, fields) in enumerate(
+                (entry for entry in by_address.items() if len(entry[1]) > 1))}
+
+
 def build_rows(data):
     """Flatten a node's contents into an ordered list of drawable rows.
 
@@ -146,22 +174,20 @@ def build_rows(data):
     shader = data.get("shader")
     if shader:
         programs = shader.get("program_indices", [])
-        particle_order = shader.get("particle_order")
-        group_order = shader.get("shader_group_order")
-        rows.append({"kind": "section", "text": "Shader (order inferred)"})
-        if group_order is None:
-            text = f"particle #{particle_order + 1}: no matching shader group"
-        else:
-            plist = ", ".join(str(p) for p in programs) or "none"
-            text = (f"particle #{particle_order + 1} → group "
-                    f"#{group_order + 1} (programs {plist})")
+        rows.append({"kind": "section", "text": "Shader (renderer slots)"})
+        text = "Programs: " + (", ".join(map(str, programs)) or "unresolved")
         rows.append({"kind": "text", "text": text, "color": "#8fd0ff"})
 
     model = data.get("model")
     if model:
-        rows.append({"kind": "section", "text": "Model (inferred)"})
+        rows.append({"kind": "section", "text": "Model (renderer reference)"})
         rows.append({"kind": "text", "text": "• " + model.split("/")[-1],
                      "color": "#d9a7ff", "full": model})
+
+    if not model and data.get("model_binding"):
+        rows.append({"kind": "section", "text": "Model"})
+        rows.append({"kind": "text", "text": "Unresolved renderer reference",
+                     "color": "#c08080"})
 
     if textures:
         rows.append({"kind": "section", "text": "Textures"})
@@ -178,20 +204,36 @@ def build_rows(data):
                          "color": "#8a8a92"})
 
     if scalars:
+        shared_groups = shared_field_groups(vfxb_encode.build_node_fields(data))
         rows.append({"kind": "section", "text": "Scalars"})
+        if shared_groups:
+            rows.append({"kind": "text", "text": "[S#] = shared address within this node",
+                         "color": "#ffcf70"})
         for p in scalars:
             val = p.get("value", p.get("values"))
+            addresses = p.get("value_addrs", [p.get("value_addr")])
+            def value_text(v, index):
+                text = f"{v:.4g}" if _finite(v) else str(v)
+                group = shared_groups.get(addresses[index]) if index < len(addresses) else None
+                return text + (f" [{group[0]}]" if group else "")
             if isinstance(val, list):
-                vs = ", ".join(f"{v:.4g}" if _finite(v) else str(v)
-                               for v in val)
-            elif _finite(val):
-                vs = f"{val:.4g}"
+                vs = ", ".join(value_text(v, i) for i, v in enumerate(val))
             else:
-                vs = str(val)
+                vs = value_text(val, 0)
             off = p.get("target_offset")
             tag = f" @{off}" if off is not None else ""
+            segments = [(f"{p['type']}{tag} = ", "#cfe8ff")]
+            values = val if isinstance(val, list) else [val]
+            for i, v in enumerate(values):
+                if i:
+                    segments.append((", ", "#cfe8ff"))
+                group = shared_groups.get(addresses[i]) if i < len(addresses) else None
+                segments.append((value_text(v, i), shared_group_color(group[0])
+                                 if group else "#cfe8ff"))
             rows.append({"kind": "text", "text": f"{p['type']}{tag} = {vs}",
-                         "color": "#cfe8ff"})
+                         "segments": segments,
+                         "color": "#ffcf70" if any(a in shared_groups for a in addresses)
+                         else "#cfe8ff"})
 
     if curves:
         groups = group_curves(curves)
@@ -568,6 +610,21 @@ class NodeItem(QtWidgets.QGraphicsItem):
                 p.setPen(QtGui.QColor(row.get("color", "#c0c0c8")))
                 txt = row["text"]
                 metrics = p.fontMetrics()
+                if "segments" in row:
+                    x = PAD
+                    for text, color in row["segments"]:
+                        available = int(self.w - PAD - x)
+                        if available <= 0:
+                            break
+                        shown = metrics.elidedText(text, QtCore.Qt.ElideRight, available)
+                        p.setPen(QtGui.QColor(color))
+                        p.drawText(QtCore.QRectF(x, y, available, rh),
+                                   QtCore.Qt.AlignVCenter, shown)
+                        x += metrics.horizontalAdvance(shown)
+                        if shown != text:
+                            break
+                    y += rh
+                    continue
                 txt = metrics.elidedText(txt, QtCore.Qt.ElideRight,
                                          int(self.w - 2 * PAD))
                 p.drawText(QtCore.QRectF(PAD, y, self.w - 2 * PAD, rh),
@@ -782,8 +839,7 @@ class ShaderViewerDialog(QtWidgets.QDialog):
 
     def __init__(self, shader, parent=None):
         super().__init__(parent)
-        particle = shader.get("particle_order", 0) + 1
-        self.setWindowTitle(f"Particle {particle} — converted GLSL")
+        self.setWindowTitle(f"Node {shader.get('node_hash', '?')} — converted GLSL")
         self.resize(1100, 780)
         lay = QtWidgets.QVBoxLayout(self)
 
@@ -908,7 +964,19 @@ class Inspector(QtWidgets.QScrollArea):
         """
         if not sections:
             return False
+        shared_groups = shared_field_groups(sections)
         self._lay.addWidget(self._heading("Editable values", size=10))
+        if shared_groups:
+            self._lay.addWidget(self._heading(
+                "Shared addresses · matching S labels use the same storage",
+                size=9, color="#ffcf70"))
+            for addr, (group_id, aliases) in shared_groups.items():
+                members = " ↔ ".join(other["key"] for _, other in aliases)
+                summary = self._heading(f"{group_id}: {members}", size=8,
+                                        bold=False, color=shared_group_color(group_id))
+                summary.setToolTip(f"File address: 0x{addr:X} ({addr})\n"
+                                   "Groups are local to this inspector panel.")
+                self._lay.addWidget(summary)
         for sec in sections:
             self._lay.addWidget(self._heading(sec["title"], size=9,
                                               color="#b9b9c0"))
@@ -919,14 +987,31 @@ class Inspector(QtWidgets.QScrollArea):
             form = QtWidgets.QFormLayout(form_host)
             form.setContentsMargins(6, 0, 6, 6)
             form.setSpacing(3)
-            form.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            form.setLabelAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
             form.setFieldGrowthPolicy(
                 QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
             for fld in sec["fields"]:
                 edit = self._make_editor(fld)
-                lbl = QtWidgets.QLabel(f'{fld["key"]}  <{fld["fmt"]}>')
-                lbl.setStyleSheet("color:#9a9aa5; font-family:Consolas;"
+                group_id, aliases = shared_groups.get(fld["offset"], (None, []))
+                shared = group_id is not None
+                label = f'{fld["key"]}  <{fld["fmt"]}>'
+                tooltip = f'File address: 0x{fld["offset"]:X} ({fld["offset"]})'
+                if shared:
+                    label = f"[{group_id}]  " + label
+                    tooltip += (
+                        "\nFields at this address in this panel:\n"
+                        + "\n".join(f"• {title}: {other['key']} <{other['fmt']}>"
+                                    for title, other in aliases)
+                        + "\nApplying an edit changes the stored bytes used by these fields."
+                        + "\nPacked bitfields may use different bits at the same address."
+                    )
+                lbl = QtWidgets.QLabel(label)
+                color = shared_group_color(group_id) if shared else "#9a9aa5"
+                lbl.setStyleSheet(f"color:{color}; font-family:Consolas;"
                                   " font-size:8pt;")
+                lbl.setToolTip(tooltip)
+                edit.setToolTip(tooltip)
                 form.addRow(lbl, edit)
             self._lay.addWidget(form_host)
 
@@ -1098,19 +1183,21 @@ class Inspector(QtWidgets.QScrollArea):
 
         model = data.get("model")
         if model:
-            binding = data.get("model_binding", {})
             index = data.get("model_string_index")
-            primary = binding.get("primary_texture_string_index")
-            self._lay.addWidget(self._heading("Model (inferred)", size=10))
+            self._lay.addWidget(self._heading("Model (renderer reference)", size=10))
             lab = QtWidgets.QLabel("• " + model)
             lab.setStyleSheet("color:#d9a7ff;")
             lab.setWordWrap(True)
             self._lay.addWidget(lab)
             meta = QtWidgets.QLabel(
-                f"string[{index}] → primary texture string[{primary}]")
+                f"0x31 +0x52 → model string[{index}]")
             meta.setStyleSheet("color:#8f8299; font-family:Consolas;"
                                " font-size:8pt;")
             self._lay.addWidget(meta)
+
+        if not model and data.get("model_binding"):
+            self._lay.addWidget(self._heading("Model: unresolved renderer reference",
+                                              size=9, color="#c08080"))
 
         if textures:
             self._lay.addWidget(self._heading("Textures", size=10))
@@ -1188,18 +1275,10 @@ class Inspector(QtWidgets.QScrollArea):
                 self._lay.addWidget(lab)
 
     def _show_shader(self, shader):
-        """Show the inferred ordered mapping and open converted GLSL in-app."""
-        particle = shader.get("particle_order")
-        group = shader.get("shader_group_order")
+        """Show renderer program references and open converted GLSL in-app."""
         programs = shader.get("program_indices", [])
-        self._lay.addWidget(self._heading("Shader (order inferred)", size=10))
-
-        if group is None:
-            mapping = f"particle #{particle + 1} → no matching shader group"
-        else:
-            plist = ", ".join(str(p) for p in programs) or "none"
-            mapping = (f"particle #{particle + 1} → shader group #{group + 1}"
-                       f"  ·  programs {plist}")
+        self._lay.addWidget(self._heading("Shader (renderer slots)", size=10))
+        mapping = "Programs: " + (", ".join(map(str, programs)) or "unresolved")
         lab = QtWidgets.QLabel(mapping)
         lab.setStyleSheet("color:#8fd0ff; font-family:Consolas;")
         lab.setWordWrap(True)
