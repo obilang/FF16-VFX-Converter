@@ -334,10 +334,20 @@ discarded.
 | type | shape | binding-target field (now captured) |
 |------|-------|-------------------------------------|
 | `0x8F` | float curve | `target_offset` (Offset24) + `target_flags` + `f4` |
-| `0x91` | float curve (variant) | `target_offset` (VarOffset 30/2) + `target_flags` |
+| `0x91` | curve + auxiliary descriptor (evaluation unresolved) | `target_offset` (VarOffset 30/2) + `target_flags`; `descriptor` preserves additional parameter reference |
+| `0x90` | descriptor binding (evaluation unresolved) | `target_offset` (VarOffset 30/2) + `target_flags`; read-only descriptor |
 | `0x8B` | scalar + bound float | `target_offset` + `target_flags` |
 | `0x1E` | bound scalar | `target_offset` + `target_flags` |
-| `0x8A` | two indirect floats | `value_offsets` (into properties table, *not* param block) |
+| `0x8A` | structured inputs (evaluation unresolved) | `source_offsets` into properties table; raw descriptors, not editable floats |
+
+The sword_kiseki_01s particle `0x55C513B2` has five exposed curves at
+256/260/264/268/272 plus a `0x90` binding at 276. The latter descriptor contains
+an apparent parameter reference to 188; the `0x91` descriptor at target 272
+contains a reference to 184. The decoder preserves these fields, but does not
+claim a runtime evaluation rule or a verified mapping to GPU UV slots.
+Earlier descriptions of `0x8A` as two floats are superseded: its observed
+sources contain structured data. These are now read-only to avoid editing
+descriptor words as floats.
 
 Consequences, all verified against raw bytes across the 55 phoenix files:
 
@@ -775,3 +785,24 @@ an effect attaches to the summon's hand/wing (the `body.mdl` / bone reference).
 - **Particle count:** no per-node count exists; emission is rate×lifetime. A
   global pool size (e.g. `1024` on a root config node) is the only capacity-like
   value — confirm it is the pool cap. 🟡
+
+## Parameter 188: VM decoding (2026-11-04)
+
+The public Nenkai/AlexPlaceres template supplies the missing VM instruction semantics:
+https://github.com/Nenkai/010GameTemplates/blob/main/Square%20Enix/Final%20Fantasy%2016/FF16_vfxb_VFXBinary.bt
+A retrieved copy is upstream_vfxb.bt. This template itself cautions that later opcode meanings need verification; formulas below are template-backed static decoding, not a runtime capture.
+
+0x8A's last four bytes are instruction length 8, data length 3 words, time-source byte 0, reserved byte 0. Its instruction pointer addresses bytes `05 00 01 00 00 0e 13 02`:
+
+- 05: PushRand
+- 00 01: PushConst data[1] (1.0)
+- 00 00: PushConst data[0] (0.0)
+- 0e: FMA
+- 13 02: Store into tagged pointer data[2] (0x400000BC -> local @188)
+
+Thus @188 = 0 + 1 * random(0,1). The two floats are bias and scale, NOT minimum and maximum. Other inputs in this same file include -0.2 and 0.4, yielding range [-0.2,0.2]. The file's zero at @188 is initial storage, not the result of this program.
+
+The descriptor at properties+676 is followed by a VM wrapper pointing back to 676 with instruction length 1, data length 2, and opcode 26 (AddConst). This supports @276 = @188 + 0.
+The matching wrapper at properties+644 contains opcode 27 (CurveAddPtr), supporting @272 = curve(t) + @184. The first 0x8A independently generates @184 using the same affine-random program.
+
+The decoder recognizes this exact random program and these wrapper layouts; unmatched programs retain unresolved metadata. Viewer now shows both generated parameters and consuming formulas. Plots of CurveAddPtr are labeled base curve only. Eleven focused tests and actual-particle offscreen inspection pass. Exact PRNG sample, seed, scheduling, and CPU-to-GPU slot mapping remain runtime questions. No game asset modified.

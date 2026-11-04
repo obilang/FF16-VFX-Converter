@@ -444,6 +444,47 @@ def _safe_f32(data, off):
     return None
 
 
+def _binding_descriptor(data, props_addr, offset, *, parameter_reference=True):
+    """Preserve a two-word descriptor without inventing its evaluation rule."""
+    address = props_addr + offset
+    result = {"offset": offset, "address": address}
+    if offset < 0 or address < 0 or address + 8 > len(data):
+        result["error"] = "descriptor outside file"
+        return result
+    first, reference = struct.unpack_from("<2I", data, address)
+    result.update(raw=data[address:address + 8].hex(), words=[first, reference])
+    if parameter_reference:
+        result.update(first_word=first, reference_word=reference,
+                      parameter_offset=reference & 0x3FFFFFFF,
+                      parameter_flags=reference >> 30)
+    return result
+
+
+def _descriptor_expression(data, props_addr, descriptor, opcode):
+    """Recognize the adjacent VM wrapper, not just a guessed property meaning.
+
+    Opcode meanings follow Nenkai/010GameTemplates FF16_vfxb_VFXBinary.bt.
+    The wrapper contains a tagged data pointer, instruction/data lengths, then
+    opcode 26 (AddConst) or 27 (CurveAddPtr). Unknown layouts stay unresolved.
+    """
+    if "error" in descriptor or descriptor.get("parameter_flags") != 1:
+        return None
+    address = descriptor["address"] + 8
+    if address + 9 > len(data):
+        return None
+    pointer, length, count, padding = struct.unpack_from("<IBBH", data, address)
+    if (pointer != descriptor["offset"] or length != 1 or count != 2
+            or padding != 0 or data[address + 8] != opcode):
+        return None
+    source = descriptor["parameter_offset"]
+    if opcode == 26:
+        value = struct.unpack_from("<f", data, descriptor["address"])[0]
+        return {"operation": "add_constant", "source_parameter": source,
+                "constant": value, "formula": f"@{source} + {value:g}"}
+    return {"operation": "curve_add_parameter", "source_parameter": source,
+            "formula": f"curve(t) + @{source}"}
+
+
 def parse_property(r, blobs, addr_0x0, tex_indices, strings):
     """Parse a single ItemProperty.
 
@@ -578,6 +619,22 @@ def parse_property(r, blobs, addr_0x0, tex_indices, strings):
         r.seek(start + size)
         return prop, start + size, child_offsets
 
+    if ptype == 0x90:
+        r.u16()
+        size = r.i16()
+        source_offset = r.i32()
+        target, flags = r.var_offset()
+        prop.update(kind="parameter_binding", target_offset=target,
+                    target_flags=flags, f4=r.i32(), size=size,
+                    raw=bytes(r.d[start + 4:start + size]).hex(),
+                    descriptor=_binding_descriptor(r.d, props_addr, source_offset),
+                    evaluation="unresolved")
+        expression = _descriptor_expression(r.d, props_addr, prop["descriptor"], 26)
+        if expression:
+            prop.update(expression=expression, evaluation="runtime_parameter")
+        r.seek(start + size)
+        return prop, start + size, child_offsets
+
     if ptype in (0x91, 0x8F):  # keyed animation curve -> KeyList
         r.u16()
         size = r.i16()
@@ -591,6 +648,12 @@ def parse_property(r, blobs, addr_0x0, tex_indices, strings):
         else:
             tgt_off, tgt_flags = r.offset24()
         f4 = r.i32()
+        if ptype == 0x91:
+            prop["descriptor"] = _binding_descriptor(r.d, props_addr, f2)
+            prop["evaluation"] = "unresolved"
+            expression = _descriptor_expression(r.d, props_addr, prop["descriptor"], 27)
+            if expression:
+                prop.update(expression=expression, evaluation="runtime_parameter")
         r.seek(props_addr + f2)
         f5 = r.i32()
         r.seek(props_addr + f5)
@@ -644,19 +707,43 @@ def parse_property(r, blobs, addr_0x0, tex_indices, strings):
         r.seek(start + size)
         return prop, start + size, child_offsets
 
-    if ptype == 0x8A:  # two indirect floats (GenerateProperty_0x8A)
+    if ptype == 0x8A:  # structured input descriptors; not editable scalar floats
         r.u16()
         size = r.i16()
         f2 = r.i32()
         f3 = r.i32()
-        # both f2 and f3 index the properties table here (not the param block);
-        # record them so the binding is visible.
-        prop["kind"] = "scalar2"
-        prop["value_offsets"] = [f2, f3]
-        # absolute byte positions of the two floats (for in-place patching)
-        prop["value_addrs"] = [props_addr + f2, props_addr + f3]
-        prop["values"] = [_safe_f32(r.d, props_addr + f2),
-                          _safe_f32(r.d, props_addr + f3)]
+        prop.update(kind="parameter_inputs", size=size,
+                    raw=bytes(r.d[start + 4:start + size]).hex(),
+                    source_offsets=[f2, f3], evaluation="unresolved")
+        prop["source_descriptors"] = [
+            _binding_descriptor(r.d, props_addr, off, parameter_reference=False)
+            for off in (f2, f3)]
+        # The second source has a 12-byte payload in the observed layout.
+        # Preserve its third word too; its runtime operation remains unknown.
+        address = props_addr + f3
+        if f3 >= 0 and 0 <= address and address + 12 <= len(r.d):
+            prop["input_words"] = list(struct.unpack_from("<3I", r.d, address))
+        if size >= 20:
+            instruction_size, data_size, time_source, reserved = struct.unpack_from(
+                "<4B", r.d, start + 16)
+            prop.update(instruction_size=instruction_size, data_size=data_size,
+                        time_source=time_source, reserved=reserved)
+            inst_addr = props_addr + f2
+            if f2 >= 0 and 0 <= inst_addr and inst_addr + instruction_size <= len(r.d):
+                instructions = bytes(r.d[inst_addr:inst_addr + instruction_size])
+                prop["instructions"] = instructions.hex()
+                # PushRand, PushConst[1], PushConst[0], FMA, Store[2].
+                # Recognize exactly this program; do not evaluate unknown VM code.
+                if (instructions == bytes([5, 0, 1, 0, 0, 14, 19, 2])
+                        and data_size == 3 and "input_words" in prop):
+                    bias, scale, destination = struct.unpack_from("<ffI", r.d, address)
+                    if destination >> 30 == 1:
+                        prop.update(target_offset=destination & 0x3FFFFFFF,
+                                    target_flags=1, evaluation="runtime_random",
+                                    expression={"operation": "random_affine",
+                                                "bias": bias, "scale": scale,
+                                                "range": sorted([bias, bias + scale]),
+                                                "formula": f"{bias:g} + {scale:g} * random(0, 1)"})
         r.seek(start + size)
         return prop, start + size, child_offsets
 
@@ -969,7 +1056,7 @@ def export_shaders(vfxb_path, blobs, out_dir, *, do_glsl=True, keep_spv=False,
         # extract_shaders names files shader_<i:04d>_u<stage>_u<u2>.<ext>,
         # where <i> is the ShaderData index. Map that index -> file paths.
         by_data_idx = {}
-        conversion_failures = 0
+        conversion_failures = []
         for dxbc in dxbc_files:
             try:
                 di = int(dxbc.stem.split("_")[1])
@@ -992,18 +1079,20 @@ def export_shaders(vfxb_path, blobs, out_dir, *, do_glsl=True, keep_spv=False,
                 continue
             glsl = dxbc.with_suffix(".glsl")
             if do_glsl and "error" not in result:
-                with contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.redirect_stdout(io.StringIO()) as conversion_log:
                     ok = converter.convert_one(str(dxbc), keep_spv=keep_spv,
                                                force=True)
                 if ok and glsl.is_file():
                     by_data_idx[di]["glsl"] = str(glsl)
                 else:
-                    by_data_idx[di]["glsl_error"] = "conversion failed"
-                    conversion_failures += 1
+                    detail = conversion_log.getvalue().strip() or "conversion failed"
+                    by_data_idx[di]["glsl_error"] = detail
+                    conversion_failures.append(detail)
 
         if conversion_failures and "error" not in result:
             result["error"] = (
-                f"{conversion_failures} DXBC shader(s) failed GLSL conversion"
+                f"{len(conversion_failures)} DXBC shader(s) failed GLSL conversion"
+                f"\n\nFirst failure:\n{conversion_failures[0]}"
             )
 
         # --- Group ShaderData blobs into verified VS+PS programs ---

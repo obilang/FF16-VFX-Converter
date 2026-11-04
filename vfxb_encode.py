@@ -22,7 +22,7 @@ editable value it reads:
   * keyframe curves  : key["value_offset"], key["time_offset"],
                        key["tangent_offsets"][0/1]
   * scalar  (0x1E)   : prop["value_addr"]
-  * scalar2 (0x8A)   : prop["value_addrs"][0/1]   (both index the prop table)
+  * 0x8A descriptors : read-only; these are not scalar float addresses
   * scalar2 (0x8B)   : prop["value_addrs"][0/1]   (f2 in prop table, f3 in item)
   * constants        : const["value_addr"] + const["value_fmt"]
 

@@ -154,6 +154,34 @@ def shared_field_groups(sections):
                 (entry for entry in by_address.items() if len(entry[1]) > 1))}
 
 
+def parameter_binding_rows(props):
+    """Read-only descriptions shared by graph cards and the detail panel."""
+    rows = []
+    for p in props:
+        expression = p.get("expression")
+        if expression:
+            target = p.get("target_offset", "?")
+            text = f"{p['type']} @{target} = {expression['formula']}"
+            if expression["operation"] == "random_affine":
+                lo, hi = expression["range"]
+                text += f"; range [{lo:g}, {hi:g}]"
+            rows.append(text)
+            continue
+        descriptor = p.get("descriptor")
+        if descriptor is not None:
+            target = p.get("target_offset", "?")
+            source = descriptor.get("parameter_offset")
+            detail = (f"parameter reference @{source} (candidate)"
+                      if source is not None else descriptor.get("error", "unresolved"))
+            prefix = "curve + " if p.get("kind") == "keylist" else ""
+            rows.append(f"{p['type']} @{target}: {prefix}{detail}; evaluation unresolved")
+        elif p.get("kind") == "parameter_inputs":
+            offsets = ", ".join(str(o) for o in p["source_offsets"])
+            rows.append(f"{p['type']}: input descriptors at properties + [{offsets}]; "
+                        "evaluation unresolved")
+    return rows
+
+
 def build_rows(data):
     """Flatten a node's contents into an ordered list of drawable rows.
 
@@ -170,6 +198,12 @@ def build_rows(data):
     others = [p for p in props if p.get("kind") in (None, "generic",
                                                     "item_group")]
     rows = []
+
+    bindings = parameter_binding_rows(props)
+    if bindings:
+        rows.append({"kind": "section", "text": "Parameter bindings (partial decode)"})
+        rows.extend({"kind": "text", "text": text, "full": text,
+                     "color": "#ffcf70"} for text in bindings)
 
     shader = data.get("shader")
     if shader:
@@ -297,7 +331,11 @@ def _binding_tag(grp):
         span = f"@{off}-{end}"
     else:
         span = f"@{off}"
-    return f"{span} f{flags:#x}" if flags is not None else span
+    tag = f"{span} f{flags:#x}" if flags is not None else span
+    if any(p.get("expression", {}).get("operation") == "curve_add_parameter"
+           for p in grp):
+        tag += " (base curve only)"
+    return tag
 
 
 def _group_uniform(grp):
@@ -1171,6 +1209,14 @@ class Inspector(QtWidgets.QScrollArea):
 
         # curves first (the interesting data), then scalars, then the rest
         props = data.get("properties", [])
+        bindings = parameter_binding_rows(props)
+        if bindings:
+            self._lay.addWidget(self._heading("Parameter bindings (partial decode)", size=10))
+            for text in bindings:
+                lab = QtWidgets.QLabel(text)
+                lab.setWordWrap(True)
+                lab.setStyleSheet("color:#ffcf70; font-family:Consolas;")
+                self._lay.addWidget(lab)
         curves = [p for p in props if p.get("kind") == "keylist"]
         scalars = [p for p in props if p.get("kind") in ("scalar", "scalar2")]
         textures = [p for p in props if p.get("kind") == "texture_group"]
